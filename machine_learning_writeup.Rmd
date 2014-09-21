@@ -1,0 +1,158 @@
+---
+title: "Machine Learning Course Project"
+author: "Kyle Jarrod McLean"
+date: "September 21, 2014"
+output: html_document
+---
+
+###Load Libraries
+
+The following libraries were used for the analysis:
+```{r, message = FALSE, warning= FALSE}
+library(magrittr)
+library(dplyr)
+library(caret)
+library(ggplot2)
+library(gridExtra)
+library(randomForest)
+```
+
+### Load training data
+
+```{r}
+
+fulldata <- read.csv("pml-training.csv")
+```
+
+### Data Processing
+
+Upon initial analysis, it was apparent that the first row in the data set contained only
+row numbers, so it was eliminated.
+```{r}
+colcut1 <- fulldata[, c(2:160)]
+```
+
+Next, the data was inspected for NAs. The following code indentified columns containg more that 5% NAs and stripped the whole column from the dataset. The resulting dataframe, colcut2, is decreased to 92 columns from 159.
+```{r}
+#identify rows with more than 95% NA
+NA_filter <- apply(colcut1, 2, l(x ~ x %>% is.na %>% which %>% length %>% 
+                                      divide_by(19622) %>% 
+                                      is_less_than(0.05)))
+#remove the mostly NA rows
+colcut2 <- colcut1[, NA_filter]
+```
+
+Surprisingly, removing the > 95% NA columns removed all NAs from the dataset, so there is no need for imputation.
+
+Next, the nearZeroVar function was used to determine which columns displayed near zero variation across all samples. Such columns would expect to be of little to no relevance to the outcome. 34 columns were determined to be near zero, and these were cut from the data, leaving the dataframe colcut3 with 58 columns.
+```{r}
+#identify "near zero" columns
+nearZero <- nearZeroVar(colcut2, saveMetrics = TRUE)
+#remove these near zero columns
+colcut3 <- colcut2[, -(nearZero[, 4] %>% which)]
+```
+
+Visual inspection of the remaining columns revealed that columns 2 through 4 were timestamp variables. These three columns were also stripped from the data, resulting in dataframe colcut4 with 54 predictors columns and one outcome column.
+
+```{r}
+colcut4 <- colcut3[, -c(2:4)]
+```
+
+The names of colcut4 were then used to subset the original data file, 'fulldata'. This 'column_filter' variable will be used later to subset pml-testing.csv file.
+
+```{r}
+column_filter <- names(colcut4)
+filtered_data <- fulldata[, column_filter]
+```
+
+### Data Partitioning
+
+The 19622 data points of the filtered_data were randomly split 60%/40% into a training and testing data set in order to implement and evaluate a prediction model. Note that this "testing" set is not the pml-testing.csv file. Herein, that file is referred to as 'validation'. 
+
+```{r}
+set.seed(1234)
+inTrain  <- createDataPartition(filtered_data$classe, p = 0.60, list = FALSE)
+training <- filtered_data[inTrain, ] # 55 columns, 11776 rows
+testing  <- filtered_data[-inTrain, ] # 55 columns, 7846 rows
+```
+
+### Model Implementation
+
+Since this is a classification problem, it was decided that a random forest model would be most suitable, as these models are quite robust on large data sets such as this. The randomForest() function was used from the randomForest library. The functions defaults were left as is, including the default ntree setting of 500.
+```{r, cache= TRUE}
+set.seed(1234)
+modFit <- randomForest(x = training[, -55], y = training[, 55])
+```
+
+### Out-of-bag Error and Cross Validation
+
+The results of the model building are as follows:
+```{r, echo = FALSE}
+modFit
+```
+
+Due to the resampling inherent to Random Forest, the Out-of-Bag (OOB) error is essentially equivalent to a cross-validation. Here, the OOB is estimated at 0.45%. As shown above, each class is estimated from the training data with less than 1% error.
+
+Another means of assessing a Random Forest model is by using rfcv() function from the RandomForest package. This was done below with a 3-fold cross-validation. The resulting plot shows the cross-validated performance (error rate) for a decreasing number of predictors (predictors are retained based on their calculated importance). The error decreases to near zero beyond 54 predictors.
+```{r, cache= TRUE}
+cv <- rfcv(trainx = training[, -55], trainy = training[, 55]) 
+cv_df <- cbind(n.var = cv$n.var, error.cv = cv$error.cv) %>% data.frame
+```
+
+```{r}
+ggplot(cv_df, aes(cv$n.var, cv$error.cv)) + geom_line() + ylab("cross-validation error") +
+    xlab("number of predictors")
+```
+
+### Accuracy
+
+To independently assess the accuracy of the model, the model was predicted on the 7846-row testing data set described above (ie: not the pml-testing.csv data).
+```{r}
+#predict on testing values
+pred <- predict(modFit, testing)
+confusionMatrix(pred, testing$classe)
+```
+
+As displayed above, the model shows a very high accuracy of 99.66% (99.5-99.77%).
+
+### Importance
+
+The importance of each variable used in the creation of the model as calculated by the random forest are displayed below:
+```{r}
+imp_values <- data.frame(modFit$importance)
+importance <- cbind(rownames(imp_values), imp_values)
+colnames(importance) <- c("variable", "meanGini")
+importance %<>% arrange(., desc(meanGini))
+importance
+```
+The predictors "num_ value" and "roll_ belt" are by far the most important predictors in the model.
+
+### Predicting on the Unknown Validation Data
+
+The unknown validation data was loaded into the workspace and filtered down to only the necessary columns in the following manner:
+```{r}
+full_validation <- read.csv("pml-testing.csv")
+validation <- full_validation[, column_filter[-55]]
+```
+
+The Random Forest model was then used to predict the values of the data:
+```{r}
+pred_v <- predict(modFit, validation)
+pred_v
+```
+
+To visualize these predictions, the 20 unkown validation points were super-imposed on a scatter-plot of the training data. The x and y axis represent the first and third most important predictors in the model ("num_ value" and "forearm_ pitch" respectively). The plot shows each of the unknown data points falling into a cluster of the color corresponding to their predicted value. This reassuringly suggests that model has successfully predicted their value.
+
+```{r, echo = FALSE}
+pred_v <- predict(modFit, validation)
+classe <- pred_v
+pred_v_df <- cbind(validation, classe)
+palette3 <- c("#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00", "#cab2d6", "#6a3d9a")
+ggplot(data = training, aes(num_window, pitch_forearm, colour = classe)) + 
+    geom_point() + scale_colour_manual(values=palette3) +
+    geom_point(data = pred_v_df, size = 4, shape = 15,
+               aes(num_window, pitch_forearm, colour = "predicted")) +
+    geom_text(data = pred_v_df, size = 5, colour = "black",
+              hjust= -0.5, vjust= -0.3, aes(num_window, pitch_forearm, label = classe))
+```
+
